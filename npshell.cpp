@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -22,6 +23,8 @@ void sigFork(int signo) {
 
 struct Command {
     vector<string> args;
+    int fd_out = STDOUT_FILENO;
+    int fd_err = STDERR_FILENO;
 };
 
 void executeCommand(const Command &command) {
@@ -50,11 +53,19 @@ void executeCommand(const Command &command) {
     // parent process
     if (child != 0) {
         // wait is important
+        struct stat fd_stat;
+        fstat(command.fd_out, &fd_stat);
+        // close file if fd_out isn't STDOUT_FILENO
+        if (command.fd_out != STDOUT_FILENO && S_ISREG(fd_stat.st_mode)) {
+            close(command.fd_out);
+        }
         waitpid(child, nullptr, 0);
         return;
     }
 
     // child process
+    dup2(command.fd_out, STDOUT_FILENO);
+    dup2(command.fd_err, STDERR_FILENO);
     vector<char *> args;
     for (const auto &arg : command.args) {
         args.push_back(strdup(arg.c_str()));
@@ -62,6 +73,10 @@ void executeCommand(const Command &command) {
     args.push_back(nullptr);
     if (execvp(args[0], args.data()) == -1 && errno == ENOENT) {
         cerr << "Unknown command: [" << args[0] << "].\n";
+        // Free allocated memory before exiting
+        for (char *arg : args) {
+            free(arg);
+        }
         exit(0);
     }
     return;
@@ -83,6 +98,14 @@ vector<Command> parseCommands(string input) {
             Command command;
             command.args = command_args;
             command_args.clear();
+
+            if (arg[0] == '>') {
+                string filename;
+                getline(ss, filename, ' ');
+                command.fd_out =
+                    open(filename.c_str(),
+                         O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0664);
+            }
             commands.push_back(command);
         } else {
             command_args.push_back(arg);
