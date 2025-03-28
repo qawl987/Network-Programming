@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unordered_map>
 #include <vector>
 using namespace std;
 
@@ -25,6 +26,8 @@ struct Command {
     vector<string> args;
     int fd_out = STDOUT_FILENO;
     int fd_err = STDERR_FILENO;
+    // 0: fd_in, 1: fd write to fd_in
+    int pipe[2] = {STDIN_FILENO, STDOUT_FILENO};
 };
 
 void executeCommand(const Command &command) {
@@ -52,6 +55,11 @@ void executeCommand(const Command &command) {
     }
     // parent process
     if (child != 0) {
+        // close pipe
+        if (command.pipe[0] != STDIN_FILENO) {
+            close(command.pipe[0]);
+            close(command.pipe[1]);
+        }
         // wait is important
         struct stat fd_stat;
         fstat(command.fd_out, &fd_stat);
@@ -64,8 +72,16 @@ void executeCommand(const Command &command) {
     }
 
     // child process
+    dup2(command.pipe[0], STDIN_FILENO);
     dup2(command.fd_out, STDOUT_FILENO);
     dup2(command.fd_err, STDERR_FILENO);
+    // Close the original pipe file descriptors
+    if (command.pipe[0] != STDIN_FILENO) {
+        close(command.pipe[0]);
+    }
+    if (command.pipe[1] != STDOUT_FILENO) {
+        close(command.pipe[1]);
+    }
     vector<char *> args;
     for (const auto &arg : command.args) {
         args.push_back(strdup(arg.c_str()));
@@ -88,7 +104,16 @@ void initShell() {
     signal(SIGCHLD, sigFork); // call wait() catch state
 }
 
-vector<Command> parseCommands(string input) {
+void update_pipeMap(unordered_map<int, pair<int, int>> &pipeMap) {
+    unordered_map<int, pair<int, int>> new_map;
+    for (const auto [key, value] : pipeMap) {
+        new_map.emplace(key - 1, value); // reduce pipeNum
+    }
+    pipeMap = new_map;
+}
+
+vector<Command> parseCommands(string input,
+                              unordered_map<int, pair<int, int>> &pipeMap) {
     vector<Command> commands;
     vector<string> command_args;
     stringstream ss(input);
@@ -99,14 +124,35 @@ vector<Command> parseCommands(string input) {
             command.args = command_args;
             command_args.clear();
 
+            if (pipeMap.count(0)) { // pipe fd_in
+                command.pipe[0] = pipeMap[0].first;
+                command.pipe[1] = pipeMap[0].second;
+                pipeMap.erase(0);
+            }
+
             if (arg[0] == '>') {
                 string filename;
                 getline(ss, filename, ' ');
                 command.fd_out =
                     open(filename.c_str(),
                          O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0664);
+            } else {
+                int pipeNum = 0;
+                if (pipeMap.count(pipeNum) == 0) {
+                    int pipe_fd[2];
+                    while (pipe(pipe_fd) == -1) {
+                        if (errno == EMFILE || errno == ENFILE) {
+                            wait(nullptr);
+                        }
+                    }
+                    pipeMap.emplace(pipeNum, make_pair(pipe_fd[0], pipe_fd[1]));
+                }
+                if (arg[0] == '|') {
+                    command.fd_out = pipeMap[pipeNum].second;
+                }
             }
             commands.push_back(command);
+
         } else {
             command_args.push_back(arg);
         }
@@ -114,13 +160,22 @@ vector<Command> parseCommands(string input) {
     if (!command_args.empty()) { // parse last command
         Command command;
         command.args = command_args;
+
+        if (pipeMap.count(0)) { // pipe fd_in
+            command.pipe[0] = pipeMap[0].first;
+            command.pipe[1] = pipeMap[0].second;
+            pipeMap.erase(0);
+        }
         commands.push_back(command);
+        update_pipeMap(pipeMap);
     }
     return commands;
 }
 
 int main() {
     initShell();
+
+    unordered_map<int, pair<int, int>> pipeMap; // 0: read, 1: write
     while (true) {
         string input;
         cout << "% ";
@@ -128,7 +183,7 @@ int main() {
         if (input.empty()) {
             continue;
         }
-        vector<Command> commands = parseCommands(input);
+        vector<Command> commands = parseCommands(input, pipeMap);
         for (auto &command : commands) {
             executeCommand(command);
         }
