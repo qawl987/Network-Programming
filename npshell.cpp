@@ -67,7 +67,10 @@ void executeCommand(const Command &command) {
         if (command.fd_out != STDOUT_FILENO && S_ISREG(fd_stat.st_mode)) {
             close(command.fd_out);
         }
-        waitpid(child, nullptr, 0);
+        // wait for child when fd_out isn't pipe
+        if (!S_ISFIFO(fd_stat.st_mode)) {
+            waitpid(child, nullptr, 0);
+        }
         return;
     }
 
@@ -138,6 +141,10 @@ vector<Command> parseCommands(string input,
                          O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0664);
             } else {
                 int pipeNum = 0;
+                if (arg.size() > 1) {
+                    pipeNum = stoi(arg.substr(1));
+                }
+
                 if (pipeMap.count(pipeNum) == 0) {
                     int pipe_fd[2];
                     while (pipe(pipe_fd) == -1) {
@@ -150,9 +157,16 @@ vector<Command> parseCommands(string input,
                 if (arg[0] == '|') {
                     command.fd_out = pipeMap[pipeNum].second;
                 }
+
+                if (arg[0] == '!') { // pipe fd_out, fd_err
+                    command.fd_out = pipeMap[pipeNum].second;
+                    command.fd_err = pipeMap[pipeNum].second;
+                }
             }
             commands.push_back(command);
-
+            if (arg != "|") { // "|" piping without updating pipeMap
+                update_pipeMap(pipeMap);
+            }
         } else {
             command_args.push_back(arg);
         }
