@@ -16,15 +16,16 @@
 
 using namespace std;
 
+// Utility class, instance independent
 class ProcessExecutor {
   public:
     struct ProcessConfig {
         vector<string> arguments;
-        array<int, 2> pipe = {STDIN_FILENO, STDOUT_FILENO};
+        int pipe[2] = {STDIN_FILENO, STDOUT_FILENO};
         int output_fd = STDOUT_FILENO;
         int error_fd = STDERR_FILENO;
     };
-
+    // static method bind on class
     static void run(const ProcessConfig &config) {
         if (handleBuiltins(config)) {
             return;
@@ -38,10 +39,14 @@ class ProcessExecutor {
         }
 
         setupChildProcessIO(config);
+        // In fact, child and parent choose one close the originally fd before
+        // dup2 is fine, but close both side in case
+        removeNonNecessaryPipes(config);
         executeExternalCommand(config);
     }
 
   private:
+    // since run call these function, need static
     static bool handleBuiltins(const ProcessConfig &config) {
         const string &cmd = config.arguments[0];
 
@@ -77,10 +82,7 @@ class ProcessExecutor {
     static void cleanupParentResources(const ProcessConfig &config) {
         // close pipe when this command is the last command to use pipe
         // i.e., cat test.html | number (cat's pipe[0] = 0,number's pipe[0]=3)
-        if (config.pipe[0] != STDIN_FILENO) {
-            close(config.pipe[0]);
-            close(config.pipe[1]);
-        }
+        removeNonNecessaryPipes(config);
 
         struct stat fd_stat;
         // get the fd file type
@@ -109,10 +111,19 @@ class ProcessExecutor {
         dup2(config.error_fd, STDERR_FILENO);
     }
 
+    static void removeNonNecessaryPipes(const ProcessConfig &config) {
+        // Close the original pipe file descriptors
+        if (config.pipe[0] != STDIN_FILENO) {
+            close(config.pipe[0]);
+        }
+        if (config.pipe[1] != STDOUT_FILENO) {
+            close(config.pipe[1]);
+        }
+    }
+
     static void executeExternalCommand(const ProcessConfig &config) {
         auto argv = prepareCommandArguments(config);
-
-        if (execvp(argv[0], argv.get())) {
+        if (execvp(argv[0], argv.data())) {
             if (errno == ENOENT) {
                 cerr << "Unknown command: [" << argv[0] << "].\n";
                 exit(0);
@@ -120,13 +131,12 @@ class ProcessExecutor {
         }
     }
 
-    static unique_ptr<char *[]>
-    prepareCommandArguments(const ProcessConfig &config) {
-        auto args = make_unique<char *[]>(config.arguments.size() + 1);
-        for (size_t i = 0; i < config.arguments.size(); i++) {
-            args[i] = strdup(config.arguments[i].c_str());
+    static vector<char *> prepareCommandArguments(const ProcessConfig &config) {
+        vector<char *> args;
+        for (const auto &arg : config.arguments) {
+            args.push_back(strdup(arg.c_str()));
         }
-        args[config.arguments.size()] = nullptr;
+        args.push_back(nullptr);
         return args;
     }
 };
@@ -160,7 +170,7 @@ class PipeManager {
         for (const auto &[id, fds] : active_pipes) {
             new_pipes.emplace(id - 1, fds);
         }
-        active_pipes = move(new_pipes);
+        active_pipes = new_pipes;
     }
 };
 
@@ -192,7 +202,7 @@ class CommandParser {
 
     void executeCurrentCommand(const string &operator_token) {
         ProcessExecutor::ProcessConfig config;
-        config.arguments = move(current_args);
+        config.arguments = current_args;
         current_args.clear();
 
         setupInputPipe(config);
@@ -207,8 +217,10 @@ class CommandParser {
     }
 
     void setupInputPipe(ProcessExecutor::ProcessConfig &config) {
+        // still need assign pipe[1] for fd_in process close fd
         if (pipe_manager.hasPipe(0)) {
-            config.pipe = pipe_manager.getPipe(0);
+            config.pipe[0] = pipe_manager.getPipe(0)[0];
+            config.pipe[1] = pipe_manager.getPipe(0)[1];
             pipe_manager.removePipe(0);
         }
     }
@@ -250,12 +262,8 @@ class CommandParser {
     void executeRemainingCommand() {
         if (!current_args.empty()) {
             ProcessExecutor::ProcessConfig config;
-            config.arguments = move(current_args);
-
-            if (pipe_manager.hasPipe(0)) {
-                config.pipe = pipe_manager.getPipe(0);
-                pipe_manager.removePipe(0);
-            }
+            config.arguments = current_args;
+            setupInputPipe(config);
 
             ProcessExecutor::run(config);
             // Command in here is definitely one command(ex: number, removetag,
