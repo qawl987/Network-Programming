@@ -96,7 +96,11 @@ class ProcessExecutor {
     static void waitForChildIfNeeded(pid_t pid, const ProcessConfig &config) {
         struct stat fd_stat;
         fstat(config.output_fd, &fd_stat);
-        // wait for child when fd_out isn't pipe, i.e., is a regular file.
+        // wait for child when fd_out isn't pipe, i.e., is a regular file or
+        // std_out.
+        // EX1: ls. shell need wait ls output to process next command
+        // EX2: large_file_process | cat. Pipe buffer have limit, so don't wait,
+        // 'cat' can consume the pipe without deadlock problem
         if (!S_ISFIFO(fd_stat.st_mode)) {
             waitpid(pid, nullptr, 0);
         }
@@ -123,11 +127,9 @@ class ProcessExecutor {
 
     static void executeExternalCommand(const ProcessConfig &config) {
         auto argv = prepareCommandArguments(config);
-        if (execvp(argv[0], argv.data())) {
-            if (errno == ENOENT) {
-                cerr << "Unknown command: [" << argv[0] << "].\n";
-                exit(0);
-            }
+        if (execvp(argv[0], argv.data()) == -1 && errno == ENOENT) {
+            cerr << "Unknown command: [" << argv[0] << "].\n";
+            exit(0);
         }
     }
 
