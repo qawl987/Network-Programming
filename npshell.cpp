@@ -20,7 +20,7 @@ class ProcessExecutor {
   public:
     struct ProcessConfig {
         vector<string> arguments;
-        array<int, 2> input_pipe = {STDIN_FILENO, STDOUT_FILENO};
+        array<int, 2> pipe = {STDIN_FILENO, STDOUT_FILENO};
         int output_fd = STDOUT_FILENO;
         int error_fd = STDERR_FILENO;
     };
@@ -75,14 +75,17 @@ class ProcessExecutor {
     }
 
     static void cleanupParentResources(const ProcessConfig &config) {
-        if (config.input_pipe[0] != STDIN_FILENO) {
-            close(config.input_pipe[0]);
-            close(config.input_pipe[1]);
+        // close pipe when this command is the last command to use pipe
+        // i.e., cat test.html | number (cat's pipe[0] = 0,number's pipe[0]=3)
+        if (config.pipe[0] != STDIN_FILENO) {
+            close(config.pipe[0]);
+            close(config.pipe[1]);
         }
 
         struct stat fd_stat;
+        // get the fd file type
         fstat(config.output_fd, &fd_stat);
-
+        // close file if fd_out isn't STDOUT_FILENO and is a regular file.
         if (config.output_fd != STDOUT_FILENO && S_ISREG(fd_stat.st_mode)) {
             close(config.output_fd);
         }
@@ -91,14 +94,17 @@ class ProcessExecutor {
     static void waitForChildIfNeeded(pid_t pid, const ProcessConfig &config) {
         struct stat fd_stat;
         fstat(config.output_fd, &fd_stat);
-
+        // wait for child when fd_out isn't pipe, i.e., is a regular file.
         if (!S_ISFIFO(fd_stat.st_mode)) {
             waitpid(pid, nullptr, 0);
         }
     }
 
     static void setupChildProcessIO(const ProcessConfig &config) {
-        dup2(config.input_pipe[0], STDIN_FILENO);
+        // Set fd_in from SetupInputPipe
+        dup2(config.pipe[0], STDIN_FILENO);
+        // Set fd_out and fd_err from HandlePiping, if no specified, use
+        // STDOUT_FILENO and STDERR_FILENO
         dup2(config.output_fd, STDOUT_FILENO);
         dup2(config.error_fd, STDERR_FILENO);
     }
@@ -193,7 +199,8 @@ class CommandParser {
         handleOperator(operator_token, config);
 
         ProcessExecutor::run(config);
-
+        // Here is mid of command, so only shift when "|n" or "!n". ">" doesn't
+        // enter here
         if (operator_token != "|") {
             pipe_manager.shiftPipeNumbers();
         }
@@ -201,7 +208,7 @@ class CommandParser {
 
     void setupInputPipe(ProcessExecutor::ProcessConfig &config) {
         if (pipe_manager.hasPipe(0)) {
-            config.input_pipe = pipe_manager.getPipe(0);
+            config.pipe = pipe_manager.getPipe(0);
             pipe_manager.removePipe(0);
         }
     }
@@ -246,11 +253,13 @@ class CommandParser {
             config.arguments = move(current_args);
 
             if (pipe_manager.hasPipe(0)) {
-                config.input_pipe = pipe_manager.getPipe(0);
+                config.pipe = pipe_manager.getPipe(0);
                 pipe_manager.removePipe(0);
             }
 
             ProcessExecutor::run(config);
+            // Command in here is definitely one command(ex: number, removetag,
+            // impossible |n & !n)
             pipe_manager.shiftPipeNumbers();
         }
     }
