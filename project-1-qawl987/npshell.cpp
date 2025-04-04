@@ -144,33 +144,30 @@ class ProcessExecutor {
 };
 
 class PipeManager {
-    unordered_map<int, array<int, 2>> active_pipes;
 
   public:
+    unordered_map<int, int[2]> active_pipes;
     void createPipe(int pipe_id) {
-        array<int, 2> pipe_fds;
-        while (pipe(pipe_fds.data()) == -1) {
+        int pipe_fds[2];
+        while (pipe(pipe_fds) == -1) {
             if (errno == EMFILE || errno == ENFILE) {
                 wait(nullptr);
             }
         }
-        fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC);
-        fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC);
-        active_pipes.emplace(pipe_id, pipe_fds);
+        active_pipes[pipe_id][0] = pipe_fds[0];
+        active_pipes[pipe_id][1] = pipe_fds[1];
     }
 
     bool hasPipe(int pipe_id) const { return active_pipes.count(pipe_id) > 0; }
 
-    array<int, 2> getPipe(int pipe_id) const {
-        return active_pipes.at(pipe_id);
-    }
-
     void removePipe(int pipe_id) { active_pipes.erase(pipe_id); }
 
     void shiftPipeNumbers() {
-        unordered_map<int, array<int, 2>> new_pipes;
+        unordered_map<int, int[2]> new_pipes;
         for (const auto &[id, fds] : active_pipes) {
-            new_pipes.emplace(id - 1, fds);
+            new_pipes[id - 1][0] = fds[0];
+            new_pipes[id - 1][1] = fds[1];
+            // new_pipes.emplace(id - 1, make_pair(fds[0], fds[1]));
         }
         active_pipes = new_pipes;
     }
@@ -200,7 +197,9 @@ class CommandParser {
     }
 
   private:
-    bool isOperator(char c) const { return c == '|' || c == '!' || c == '>'; }
+    bool isOperator(char c) const {
+        return c == '|' || c == '!' || c == '>' || c == '<';
+    }
 
     void executeCurrentCommand(const string &operator_token) {
         ProcessExecutor::ProcessConfig config;
@@ -221,8 +220,9 @@ class CommandParser {
     void setupInputPipe(ProcessExecutor::ProcessConfig &config) {
         // still need assign pipe[1] for fd_in process close fd
         if (pipe_manager.hasPipe(0)) {
-            config.pipe[0] = pipe_manager.getPipe(0)[0];
-            config.pipe[1] = pipe_manager.getPipe(0)[1];
+            int *pipe_fds = pipe_manager.active_pipes[0];
+            config.pipe[0] = pipe_fds[0];
+            config.pipe[1] = pipe_fds[1];
             pipe_manager.removePipe(0);
         }
     }
@@ -230,7 +230,13 @@ class CommandParser {
     void handleOperator(const string &op,
                         ProcessExecutor::ProcessConfig &config) {
         if (op[0] == '>') {
-            handleRedirection(config);
+            if (op.size() > 1) {
+                handleAppendRedirection(config);
+            } else {
+                handleRedirection(config);
+            }
+        } else if (op[0] == '<') {
+            handleInputRedirection(config);
         } else {
             handlePiping(op, config);
         }
@@ -242,6 +248,18 @@ class CommandParser {
         config.output_fd = open(filename.c_str(),
                                 O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0664);
     }
+    void handleAppendRedirection(ProcessExecutor::ProcessConfig &config) {
+        string filename;
+        input_stream >> filename;
+        config.output_fd = open(
+            filename.c_str(), O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0664);
+    }
+
+    void handleInputRedirection(ProcessExecutor::ProcessConfig &config) {
+        string filename;
+        input_stream >> filename;
+        config.pipe[0] = open(filename.c_str(), O_RDONLY | O_CLOEXEC);
+    }
 
     void handlePiping(const string &op,
                       ProcessExecutor::ProcessConfig &config) {
@@ -251,7 +269,7 @@ class CommandParser {
             pipe_manager.createPipe(pipe_id);
         }
 
-        auto pipe_fds = pipe_manager.getPipe(pipe_id);
+        int *pipe_fds = pipe_manager.active_pipes[pipe_id];
 
         if (op[0] == '|') {
             config.output_fd = pipe_fds[1];
