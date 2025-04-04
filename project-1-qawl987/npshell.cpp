@@ -101,6 +101,8 @@ class ProcessExecutor {
         // EX1: ls. shell need wait ls output to process next command
         // EX2: large_file_process | cat. Pipe buffer have limit, so don't wait,
         // 'cat' can consume the pipe without deadlock problem
+        // EX3: ls | cat, parent won't wait ls(output_fd is pipe), but wait
+        // cat(output_fd is std_out)
         if (!S_ISFIFO(fd_stat.st_mode)) {
             waitpid(pid, nullptr, 0);
         }
@@ -167,7 +169,6 @@ class PipeManager {
         for (const auto &[id, fds] : active_pipes) {
             new_pipes[id - 1][0] = fds[0];
             new_pipes[id - 1][1] = fds[1];
-            // new_pipes.emplace(id - 1, make_pair(fds[0], fds[1]));
         }
         active_pipes = new_pipes;
     }
